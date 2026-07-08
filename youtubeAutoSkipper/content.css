@@ -1,0 +1,21 @@
+#yt-auto-skipper-notice {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  z-index: 999999;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.85);
+  color: #ffffff;
+  font-size: 14px;
+  font-family: Arial, "Microsoft JhengHei", sans-serif;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+
+#yt-auto-skipper-notice.show {
+  opacity: 1;
+  transform: translateY(0);
+}

@@ -1,0 +1,103 @@
+body {
+  width: 320px;
+  margin: 0;
+  font-family: Arial, "Microsoft JhengHei", sans-serif;
+  background: #f5f5f5;
+  color: #222;
+}
+
+.container {
+  padding: 14px;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.card {
+  padding: 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
+
+.switch-row,
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.status-row span {
+  color: #555;
+}
+
+.status-row strong {
+  color: #111;
+}
+
+.status-message {
+  margin-top: 10px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #eeeeee;
+  font-weight: bold;
+}
+
+.checked-time {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #666;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px;
+  margin-bottom: 10px;
+}
+
+button {
+  width: 100%;
+  padding: 8px;
+  margin-top: 6px;
+  border: none;
+  border-radius: 6px;
+  background: #cc0000;
+  color: white;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+button:hover {
+  background: #a80000;
+}
+
+button.secondary {
+  background: #444;
+}
+
+button.secondary:hover {
+  background: #222;
+}
+
+#statusText {
+  min-height: 18px;
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #008000;
+}

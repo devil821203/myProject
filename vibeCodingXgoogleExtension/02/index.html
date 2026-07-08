@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>鍵盤亮燈小遊戲</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="game">
+    <h1>鍵盤亮燈小遊戲</h1>
+
+    <p class="hint">
+      按下鍵盤 A、S、D、F、G，對應元素會亮起來。
+    </p>
+
+    <section class="instructions">
+      <p>A → 紅色元素</p>
+      <p>S → 橘色元素</p>
+      <p>D → 黃色元素</p>
+      <p>F → 綠色元素</p>
+      <p>G → 藍色元素</p>
+    </section>
+
+    <section class="elements">
+      <div id="element-a" class="box red">A<br />紅色元素</div>
+      <div id="element-s" class="box orange">S<br />橘色元素</div>
+      <div id="element-d" class="box yellow">D<br />黃色元素</div>
+      <div id="element-f" class="box green">F<br />綠色元素</div>
+      <div id="element-g" class="box blue">G<br />藍色元素</div>
+    </section>
+
+    <p id="status">請按下 A、S、D、F、G 任一鍵</p>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>

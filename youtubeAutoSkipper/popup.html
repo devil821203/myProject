@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Auto Skipper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="container">
+    <h1>YouTube Auto Skipper</h1>
+
+    <section class="card">
+      <label class="switch-row">
+        <span>啟用自動略過</span>
+        <input id="enabledToggle" type="checkbox">
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>目前狀態</h2>
+
+      <div class="status-row">
+        <span>是否在 YouTube</span>
+        <strong id="youtubeStatus">讀取中</strong>
+      </div>
+
+      <div class="status-row">
+        <span>是否偵測到廣告</span>
+        <strong id="adStatus">讀取中</strong>
+      </div>
+
+      <div class="status-row">
+        <span>是否可略過</span>
+        <strong id="skipStatus">讀取中</strong>
+      </div>
+
+      <div class="status-message" id="lastAction">讀取中</div>
+      <div class="checked-time" id="lastCheckedAt"></div>
+    </section>
+
+    <section class="card">
+      <label for="intervalInput">檢查間隔 ms</label>
+      <input id="intervalInput" type="number" min="200" step="100">
+
+      <button id="saveButton">儲存設定</button>
+      <button id="refreshButton" class="secondary">重新偵測</button>
+
+      <p id="statusText"></p>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

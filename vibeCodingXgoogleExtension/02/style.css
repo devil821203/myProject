@@ -1,0 +1,98 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Arial, "Microsoft JhengHei", sans-serif;
+  background: #111827;
+  color: white;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.game {
+  width: 90%;
+  max-width: 900px;
+  text-align: center;
+}
+
+h1 {
+  margin-bottom: 10px;
+}
+
+.hint {
+  color: #d1d5db;
+}
+
+.instructions {
+  margin: 24px auto;
+  padding: 16px;
+  max-width: 400px;
+  background: #1f2937;
+  border-radius: 12px;
+  text-align: left;
+}
+
+.instructions p {
+  margin: 8px 0;
+  font-size: 18px;
+}
+
+.elements {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 30px;
+}
+
+.box {
+  width: 130px;
+  height: 130px;
+  border-radius: 16px;
+  background: #374151;
+  border: 3px solid #4b5563;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 22px;
+  font-weight: bold;
+  opacity: 0.35;
+  transition: 0.15s;
+}
+
+.box.active {
+  opacity: 1;
+  transform: scale(1.12);
+  box-shadow: 0 0 30px white;
+}
+
+.red.active {
+  background: #ef4444;
+}
+
+.orange.active {
+  background: #f97316;
+}
+
+.yellow.active {
+  background: #eab308;
+  color: #111827;
+}
+
+.green.active {
+  background: #22c55e;
+}
+
+.blue.active {
+  background: #3b82f6;
+}
+
+#status {
+  margin-top: 30px;
+  font-size: 22px;
+  color: #facc15;
+}
