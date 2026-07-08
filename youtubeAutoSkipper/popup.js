@@ -1,27 +1,28 @@
 const DEFAULT_SETTINGS = {
-  enabled: true,
-  checkIntervalMs: 300
+  enabled: true
 };
 
 const enabledToggle = document.getElementById("enabledToggle");
-const intervalInput = document.getElementById("intervalInput");
 
 const youtubeStatus = document.getElementById("youtubeStatus");
+const playerStatus = document.getElementById("playerStatus");
 const adStatus = document.getElementById("adStatus");
+const foundSkipStatus = document.getElementById("foundSkipStatus");
 const skipStatus = document.getElementById("skipStatus");
+const skipCount = document.getElementById("skipCount");
 const lastAction = document.getElementById("lastAction");
+const lastSkipAt = document.getElementById("lastSkipAt");
 const lastCheckedAt = document.getElementById("lastCheckedAt");
-
-const saveButton = document.getElementById("saveButton");
+const skipButtonText = document.getElementById("skipButtonText");
 const refreshButton = document.getElementById("refreshButton");
 const statusText = document.getElementById("statusText");
+const lastError = document.getElementById("lastError");
 
-let statusTimer = null;
+let refreshTimer = null;
 
 function loadSettings() {
   chrome.storage.sync.get(DEFAULT_SETTINGS, (settings) => {
     enabledToggle.checked = settings.enabled;
-    intervalInput.value = settings.checkIntervalMs;
   });
 }
 
@@ -35,117 +36,110 @@ async function getCurrentTab() {
 }
 
 async function requestStatus() {
-  try {
-    const tab = await getCurrentTab();
+  const tab = await getCurrentTab();
 
-    if (!tab || !tab.url || !tab.url.includes("youtube.com")) {
-      renderStatus({
-        enabled: enabledToggle.checked,
-        isYouTube: false,
-        isAdPlaying: false,
-        canSkip: false,
-        lastAction: "目前分頁不是 YouTube",
-        lastCheckedAt: new Date().toLocaleTimeString()
-      });
-      return;
-    }
-
-    chrome.tabs.sendMessage(
-      tab.id,
-      { type: "GET_STATUS" },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          renderStatus({
-            enabled: enabledToggle.checked,
-            isYouTube: true,
-            isAdPlaying: false,
-            canSkip: false,
-            lastAction: "尚未注入腳本，請重新整理 YouTube 頁面",
-            lastCheckedAt: new Date().toLocaleTimeString()
-          });
-          return;
-        }
-
-        renderStatus(response);
-      }
-    );
-  } catch (error) {
+  if (!tab || !tab.url || !tab.url.includes("youtube.com")) {
     renderStatus({
       enabled: enabledToggle.checked,
       isYouTube: false,
+      hasPlayer: false,
       isAdPlaying: false,
+      foundSkipButton: false,
       canSkip: false,
-      lastAction: "狀態讀取失敗",
+      skipCount: 0,
+      lastAction: "目前分頁不是 YouTube",
+      lastSkipAt: "",
       lastCheckedAt: new Date().toLocaleTimeString()
     });
+    return;
   }
+
+  chrome.tabs.sendMessage(
+    tab.id,
+    { type: "GET_STATUS" },
+    (response) => {
+      if (chrome.runtime.lastError || !response) {
+        renderStatus({
+          enabled: enabledToggle.checked,
+          isYouTube: true,
+          hasPlayer: false,
+          isAdPlaying: false,
+          foundSkipButton: false,
+          canSkip: false,
+          skipCount: 0,
+          lastAction: "尚未注入腳本，請重新整理 YouTube 頁面",
+          lastSkipAt: "",
+          lastCheckedAt: new Date().toLocaleTimeString()
+        });
+        return;
+      }
+
+      renderStatus(response);
+    }
+  );
 }
 
 function renderStatus(status) {
   youtubeStatus.textContent = status.isYouTube ? "是" : "否";
+  playerStatus.textContent = status.hasPlayer ? "已找到" : "未找到";
   adStatus.textContent = status.isAdPlaying ? "是" : "否";
+  foundSkipStatus.textContent = status.foundSkipButton ? "是" : "否";
   skipStatus.textContent = status.canSkip ? "是" : "否";
-
+  skipCount.textContent = String(status.skipCount || 0);
+  skipButtonText.textContent = status.skipButtonText || "無";
   lastAction.textContent = status.lastAction || "無狀態";
+  lastError.textContent = status.lastError || "無";
+  lastSkipAt.textContent = status.lastSkipAt
+    ? `最近略過：${status.lastSkipAt}`
+    : "最近略過：無";
+
   lastCheckedAt.textContent = status.lastCheckedAt
     ? `最後檢查：${status.lastCheckedAt}`
     : "";
 }
 
-function saveSettings() {
-  const checkIntervalMs = Number(intervalInput.value);
+async function toggleEnabled() {
+  const enabled = enabledToggle.checked;
 
-  if (!Number.isInteger(checkIntervalMs) || checkIntervalMs < 200) {
-    statusText.textContent = "檢查間隔至少需要 200ms";
+  chrome.storage.sync.set({ enabled });
+
+  const tab = await getCurrentTab();
+
+  if (!tab || !tab.url || !tab.url.includes("youtube.com")) {
+    requestStatus();
     return;
   }
 
-  chrome.storage.sync.set(
+  chrome.tabs.sendMessage(
+    tab.id,
     {
-      enabled: enabledToggle.checked,
-      checkIntervalMs
+      type: "SET_ENABLED",
+      enabled
     },
     () => {
-      statusText.textContent = "設定已儲存";
       requestStatus();
-
-      setTimeout(() => {
-        statusText.textContent = "";
-      }, 1500);
     }
   );
 }
 
-async function toggleEnabled() {
-  const tab = await getCurrentTab();
-
-  chrome.storage.sync.set({ enabled: enabledToggle.checked });
-
-  if (tab && tab.url && tab.url.includes("youtube.com")) {
-    chrome.tabs.sendMessage(
-      tab.id,
-      {
-        type: "SET_ENABLED",
-        enabled: enabledToggle.checked
-      },
-      () => {
-        requestStatus();
-      }
-    );
-  }
-}
-
-saveButton.addEventListener("click", saveSettings);
-refreshButton.addEventListener("click", requestStatus);
 enabledToggle.addEventListener("change", toggleEnabled);
+
+refreshButton.addEventListener("click", () => {
+  requestStatus();
+  statusText.textContent = "已重新偵測";
+
+  setTimeout(() => {
+    statusText.textContent = "";
+  }, 1000);
+});
 
 loadSettings();
 requestStatus();
 
-statusTimer = setInterval(requestStatus, 1000);
+refreshTimer = setInterval(requestStatus, 1000);
 
 window.addEventListener("unload", () => {
-  if (statusTimer) {
-    clearInterval(statusTimer);
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
   }
 });

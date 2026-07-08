@@ -20,31 +20,52 @@
       <h2>目前狀態</h2>
 
       <div class="status-row">
-        <span>是否在 YouTube</span>
+        <span>YouTube 分頁</span>
         <strong id="youtubeStatus">讀取中</strong>
       </div>
 
       <div class="status-row">
-        <span>是否偵測到廣告</span>
+        <span>播放器</span>
+        <strong id="playerStatus">讀取中</strong>
+      </div>
+
+      <div class="status-row">
+        <span>廣告播放中</span>
         <strong id="adStatus">讀取中</strong>
       </div>
 
       <div class="status-row">
-        <span>是否可略過</span>
+        <span>找到略過按鈕</span>
+        <strong id="foundSkipStatus">讀取中</strong>
+      </div>
+
+      <div class="status-row">
+        <span>可略過</span>
         <strong id="skipStatus">讀取中</strong>
+      </div>
+      
+      <div class="status-row">
+        <span>按鈕文字</span>
+        <strong id="skipButtonText">無</strong>
+      </div>     
+
+      <div class="status-row">
+        <span>錯誤訊息</span>
+        <strong id="lastError">無</strong>
+      </div>
+      
+      <div class="status-row">
+        <span>已略過次數</span>
+        <strong id="skipCount">0</strong>
       </div>
 
       <div class="status-message" id="lastAction">讀取中</div>
+      <div class="checked-time" id="lastSkipAt"></div>
       <div class="checked-time" id="lastCheckedAt"></div>
     </section>
 
     <section class="card">
-      <label for="intervalInput">檢查間隔 ms</label>
-      <input id="intervalInput" type="number" min="200" step="100">
-
-      <button id="saveButton">儲存設定</button>
-      <button id="refreshButton" class="secondary">重新偵測</button>
-
+      <button id="refreshButton">重新偵測</button>
       <p id="statusText"></p>
     </section>
   </main>
