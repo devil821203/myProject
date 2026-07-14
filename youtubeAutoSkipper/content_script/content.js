@@ -1,13 +1,15 @@
 (() => {
   const DEFAULT_SETTINGS = {
-    enabled: true
+    enabled: true,
+    checkIntervalMs: 500
   };
 
+  const MIN_REQUEST_INTERVAL_MS = 1800;
+
   let settings = { ...DEFAULT_SETTINGS };
-  let observer = null;
-  let rafId = null;
-  let lastClickAt = 0;
-  let skipCount = 0;
+  let timerId = null;
+  let requestInProgress = false;
+  let lastRequestAt = 0;
 
   let status = {
     enabled: true,
@@ -17,203 +19,214 @@
     foundSkipButton: false,
     canSkip: false,
     skipButtonText: "",
+    matchedSelector: "",
     skipCount: 0,
-    lastAction: "尚未偵測",
+    lastAction: "初始化中",
     lastSkipAt: "",
     lastCheckedAt: "",
-    lastError: ""
+    lastError: "",
+    lastMethod: ""
   };
 
-  function init() {
-    chrome.storage.sync.get(DEFAULT_SETTINGS, (result) => {
-      settings = result;
-      status.enabled = settings.enabled;
-      attachObserver();
-      scheduleCheck();
-    });
+  initialize();
+
+  function initialize() {
+    chrome.storage.sync.get(
+      DEFAULT_SETTINGS,
+      (storedSettings) => {
+        settings = {
+          ...DEFAULT_SETTINGS,
+          ...storedSettings
+        };
+
+        status.enabled = settings.enabled;
+
+        restartChecker();
+        checkAd();
+      }
+    );
   }
 
-  function attachObserver() {
-    if (observer) {
-      observer.disconnect();
-      observer = null;
+  function restartChecker() {
+    if (timerId) {
+      clearInterval(timerId);
     }
 
-    const player = document.querySelector("#movie_player");
-
-    if (!player) {
-      updateStatus({
-        hasPlayer: false,
-        lastAction: "尚未找到播放器"
-      });
-
-      setTimeout(attachObserver, 1000);
-      return;
-    }
-
-    observer = new MutationObserver(() => {
-      scheduleCheck();
-    });
-
-    observer.observe(player, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["class", "style", "aria-label", "title", "disabled", "id"]
-    });
-
-    updateStatus({
-      hasPlayer: true,
-      lastAction: "已找到播放器"
-    });
-  }
-
-  function scheduleCheck() {
-    if (rafId) return;
-
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
-      checkAd();
-    });
+    timerId = setInterval(
+      checkAd,
+      Math.max(
+        300,
+        Number(settings.checkIntervalMs) || 500
+      )
+    );
   }
 
   function checkAd() {
-    const player = document.querySelector("#movie_player");
-    const skipButton = findSkipButton();
-    const isAdPlaying = detectAdPlaying(player, skipButton);
-    const foundSkipButton = Boolean(skipButton);
-    const canSkip = foundSkipButton && isClickable(skipButton);
-    const skipButtonText = skipButton ? getText(skipButton) : "";
+    const player =
+      document.querySelector("#movie_player");
+
+    const isAdPlaying =
+      Boolean(player) &&
+      (
+        player.classList.contains("ad-showing") ||
+        player.classList.contains("ad-interrupting")
+      );
+
+    const buttonResult = findSkipButton();
+    const foundSkipButton =
+      Boolean(buttonResult.element);
+
+    const canSkip =
+      foundSkipButton &&
+      isClickable(buttonResult.element);
 
     updateStatus({
       enabled: settings.enabled,
-      isYouTube: location.hostname.includes("youtube.com"),
+      isYouTube:
+        location.hostname.includes("youtube.com"),
       hasPlayer: Boolean(player),
       isAdPlaying,
       foundSkipButton,
       canSkip,
-      skipButtonText,
-      skipCount,
-      lastCheckedAt: new Date().toLocaleTimeString(),
-      lastAction: getActionText(isAdPlaying, foundSkipButton, canSkip)
+      skipButtonText: buttonResult.text,
+      matchedSelector: buttonResult.selector,
+      lastCheckedAt:
+        new Date().toLocaleTimeString(),
+      lastAction: getStatusText(
+        Boolean(player),
+        isAdPlaying,
+        foundSkipButton,
+        canSkip
+      )
     });
 
-    if (!settings.enabled) return;
-    if (!isAdPlaying) return;
-    if (!canSkip || !skipButton) return;
+    if (!settings.enabled) {
+      return;
+    }
+
+    if (!isAdPlaying) {
+      return;
+    }
+
+    if (!foundSkipButton || !canSkip) {
+      return;
+    }
+
+    if (requestInProgress) {
+      return;
+    }
 
     const now = Date.now();
 
-    if (now - lastClickAt < 2000) return;
+    if (
+      now - lastRequestAt <
+      MIN_REQUEST_INTERVAL_MS
+    ) {
+      return;
+    }
 
-    lastClickAt = now;
-
-    skipByDebugger(skipButton);
-  }
-
-  function detectAdPlaying(player, skipButton) {
-    if (skipButton) return true;
-
-    if (!player) return false;
-
-    return (
-      player.classList.contains("ad-showing") ||
-      player.classList.contains("ad-interrupting")
-    );
+    lastRequestAt = now;
+    requestSkip(buttonResult);
   }
 
   function findSkipButton() {
-    const candidates = [
-      ...document.querySelectorAll("button"),
-      ...document.querySelectorAll("tp-yt-paper-button"),
-      ...document.querySelectorAll("[id*='skip-button']"),
-      ...document.querySelectorAll("[class*='ytp-ad-skip']")
+    const selectors = [
+      "button[id*='skip-button']",
+      "[id*='skip-button']",
+      "button.ytp-ad-skip-button",
+      "button.ytp-ad-skip-button-modern",
+      ".ytp-ad-skip-button",
+      ".ytp-ad-skip-button-modern",
+      ".ytp-skip-ad-button",
+      ".ytp-ad-skip-button-container button",
+      "button[aria-label*='Skip']",
+      "button[aria-label*='skip']",
+      "button[aria-label*='略過']",
+      "button[aria-label*='跳過']"
     ];
 
-    for (const element of candidates) {
-      if (!isVisible(element)) continue;
-      if (!isClickable(element)) continue;
+    for (const selector of selectors) {
+      const elements =
+        document.querySelectorAll(selector);
 
-      const id = element.id || "";
-      const className = String(element.className || "");
-      const text = getText(element).toLowerCase();
+      for (const element of elements) {
+        if (!isSkipButton(element)) {
+          continue;
+        }
 
-      const matchedById = id.includes("skip-button");
-      const matchedByClass = className.includes("ytp-ad-skip");
-      const matchedByText =
-        text.includes("skip ad") ||
-        text.includes("skip ads") ||
-        text.includes("略過廣告") ||
-        text.includes("略過這則廣告") ||
-        text.includes("跳過廣告");
+        if (!hasLayout(element)) {
+          continue;
+        }
 
-      if (matchedById || matchedByClass || matchedByText) {
-        return element;
+        return {
+          element,
+          selector,
+          text: getElementText(element)
+        };
       }
     }
 
-    return null;
+    const candidates =
+      document.querySelectorAll(
+        "button, tp-yt-paper-button, [role='button']"
+      );
+
+    for (const element of candidates) {
+      if (
+        isSkipButton(element) &&
+        hasLayout(element)
+      ) {
+        return {
+          element,
+          selector: buildSelector(element),
+          text: getElementText(element)
+        };
+      }
+    }
+
+    return {
+      element: null,
+      selector: "",
+      text: ""
+    };
   }
 
-  function skipByDebugger(button) {
-    const rect = button.getBoundingClientRect();
+  function isSkipButton(element) {
+    const id =
+      String(element.id || "").toLowerCase();
 
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
+    const className =
+      String(element.className || "").toLowerCase();
 
-    chrome.runtime.sendMessage(
-      {
-        type: "SKIP_AD_BY_DEBUGGER",
-        x,
-        y
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          updateStatus({
-            lastAction: "Debugger 點擊失敗",
-            lastError: chrome.runtime.lastError.message
-          });
-          return;
-        }
+    const text =
+      getElementText(element).toLowerCase();
 
-        if (!response || !response.success) {
-          updateStatus({
-            lastAction: "Debugger 點擊失敗",
-            lastError: response ? response.message : "無回應"
-          });
-          return;
-        }
-
-        skipCount++;
-
-        updateStatus({
-          skipCount,
-          lastAction: "已使用 Debugger 自動略過廣告",
-          lastSkipAt: new Date().toLocaleTimeString(),
-          lastError: ""
-        });
-
-        showNotice("已自動略過廣告");
-      }
+    return (
+      id.includes("skip-button") ||
+      className.includes("ytp-ad-skip") ||
+      className.includes("ytp-skip-ad") ||
+      text.includes("skip ad") ||
+      text.includes("skip ads") ||
+      text.includes("略過廣告") ||
+      text.includes("略過這則廣告") ||
+      text.includes("跳過廣告")
     );
   }
 
-  function getText(element) {
-    return [
-      element.innerText,
-      element.textContent,
-      element.getAttribute("aria-label"),
-      element.getAttribute("title")
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
+  /*
+   * 只檢查元素是否有尺寸。
+   * 不要求元素位於目前 viewport 內。
+   */
+  function hasLayout(element) {
+    if (!element) {
+      return false;
+    }
 
-  function isVisible(element) {
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
+    const rect =
+      element.getBoundingClientRect();
+
+    const style =
+      getComputedStyle(element);
 
     return (
       rect.width > 0 &&
@@ -225,33 +238,160 @@
   }
 
   function isClickable(element) {
-    const style = window.getComputedStyle(element);
-
     return (
+      element &&
       !element.disabled &&
-      element.getAttribute("aria-disabled") !== "true" &&
-      style.pointerEvents !== "none"
+      element.getAttribute("aria-disabled") !== "true"
     );
   }
 
-  function getActionText(isAdPlaying, foundSkipButton, canSkip) {
-    if (!settings.enabled) return "功能已停用";
-    if (!isAdPlaying) return "目前沒有偵測到廣告";
-    if (isAdPlaying && !foundSkipButton) return "廣告播放中，但尚未出現略過按鈕";
-    if (foundSkipButton && !canSkip) return "找到略過按鈕，但不可點擊";
-    if (foundSkipButton && canSkip) return "找到可略過按鈕，準備使用 Debugger 點擊";
-    return "偵測中";
+  function getElementText(element) {
+    return [
+      element?.innerText,
+      element?.textContent,
+      element?.getAttribute("aria-label"),
+      element?.getAttribute("title")
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  function updateStatus(partial) {
+  function buildSelector(element) {
+    if (!element) {
+      return "";
+    }
+
+    if (element.id) {
+      return `#${CSS.escape(element.id)}`;
+    }
+
+    const tag =
+      element.tagName.toLowerCase();
+
+    const classes =
+      Array.from(element.classList)
+        .filter(Boolean)
+        .slice(0, 5)
+        .map((name) => CSS.escape(name));
+
+    if (classes.length > 0) {
+      return `${tag}.${classes.join(".")}`;
+    }
+
+    return tag;
+  }
+
+  function requestSkip(buttonResult) {
+    requestInProgress = true;
+
+    updateStatus({
+      lastAction: "正在執行略過操作",
+      lastError: ""
+    });
+
+    chrome.runtime.sendMessage(
+      {
+        type: "SKIP_YOUTUBE_AD",
+        selector:
+          buttonResult.selector ||
+          buildSelector(buttonResult.element)
+      },
+      (response) => {
+        requestInProgress = false;
+
+        if (chrome.runtime.lastError) {
+          updateStatus({
+            lastAction: "Background 連線失敗",
+            lastError:
+              chrome.runtime.lastError.message
+          });
+
+          return;
+        }
+
+        if (!response) {
+          updateStatus({
+            lastAction: "Background 無回應",
+            lastError: "沒有收到略過結果"
+          });
+
+          return;
+        }
+
+        if (response.busy) {
+          return;
+        }
+
+        if (!response.success) {
+          updateStatus({
+            lastAction: "略過廣告失敗",
+            lastError:
+              response.message || "未知錯誤"
+          });
+
+          return;
+        }
+
+        updateStatus({
+          skipCount: status.skipCount + 1,
+          lastAction:
+            response.method === "runtime-event"
+              ? "已略過畫面外廣告"
+              : "已使用 Debugger 略過廣告",
+          lastSkipAt:
+            new Date().toLocaleTimeString(),
+          lastError: "",
+          lastMethod: response.method || ""
+        });
+
+        showNotice("已自動略過廣告");
+      }
+    );
+  }
+
+  function getStatusText(
+    hasPlayer,
+    isAdPlaying,
+    foundSkipButton,
+    canSkip
+  ) {
+    if (!settings.enabled) {
+      return "功能已停用";
+    }
+
+    if (!hasPlayer) {
+      return "尚未找到播放器";
+    }
+
+    if (!isAdPlaying) {
+      return "目前沒有偵測到廣告";
+    }
+
+    if (!foundSkipButton) {
+      return "廣告播放中，尚未出現略過按鈕";
+    }
+
+    if (!canSkip) {
+      return "找到略過按鈕，但目前不可使用";
+    }
+
+    return "已找到可略過按鈕";
+  }
+
+  function updateStatus(partialStatus) {
     status = {
       ...status,
-      ...partial
+      ...partialStatus
     };
   }
 
   function showNotice(message) {
-    let notice = document.getElementById("yt-auto-skipper-notice");
+    let notice =
+      document.getElementById(
+        "yt-auto-skipper-notice"
+      );
 
     if (!notice) {
       notice = document.createElement("div");
@@ -267,47 +407,80 @@
     }, 1200);
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === "GET_STATUS") {
-      scheduleCheck();
-
-      setTimeout(() => {
+  chrome.runtime.onMessage.addListener(
+    (message, sender, sendResponse) => {
+      if (message.type === "GET_STATUS") {
+        checkAd();
         sendResponse(status);
-      }, 80);
+        return false;
+      }
 
-      return true;
+      if (message.type === "SET_ENABLED") {
+        settings.enabled =
+          Boolean(message.enabled);
+
+        status.enabled = settings.enabled;
+
+        chrome.storage.sync.set({
+          enabled: settings.enabled
+        });
+
+        sendResponse(status);
+        return false;
+      }
+
+      if (message.type === "SET_INTERVAL") {
+        settings.checkIntervalMs =
+          Math.max(
+            300,
+            Number(message.checkIntervalMs) || 500
+          );
+
+        chrome.storage.sync.set({
+          checkIntervalMs:
+            settings.checkIntervalMs
+        });
+
+        restartChecker();
+        sendResponse(status);
+        return false;
+      }
+
+      return false;
     }
+  );
 
-    if (message.type === "SET_ENABLED") {
-      settings.enabled = Boolean(message.enabled);
-      status.enabled = settings.enabled;
+  chrome.storage.onChanged.addListener(
+    (changes, areaName) => {
+      if (areaName !== "sync") {
+        return;
+      }
 
-      chrome.storage.sync.set({ enabled: settings.enabled }, () => {
-        scheduleCheck();
+      if (changes.enabled) {
+        settings.enabled =
+          Boolean(changes.enabled.newValue);
 
-        setTimeout(() => {
-          sendResponse(status);
-        }, 80);
-      });
+        status.enabled = settings.enabled;
+      }
 
-      return true;
+      if (changes.checkIntervalMs) {
+        settings.checkIntervalMs =
+          Math.max(
+            300,
+            Number(
+              changes.checkIntervalMs.newValue
+            ) || 500
+          );
+
+        restartChecker();
+      }
     }
-  });
+  );
 
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "sync") return;
-
-    if (changes.enabled) {
-      settings.enabled = changes.enabled.newValue;
-      status.enabled = settings.enabled;
-      scheduleCheck();
+  window.addEventListener(
+    "yt-navigate-finish",
+    () => {
+      setTimeout(checkAd, 300);
     }
-  });
-
-  window.addEventListener("yt-navigate-finish", () => {
-    attachObserver();
-    scheduleCheck();
-  });
-
-  init();
+  );
 })();

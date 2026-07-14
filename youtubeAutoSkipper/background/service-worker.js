@@ -1,14 +1,7 @@
 const DEBUGGER_VERSION = "1.3";
 
-/**
- * 紀錄目前已附加 Debugger 的分頁。
- */
 const attachedTabs = new Set();
-
-/**
- * 避免同一分頁同時進行多次點擊。
- */
-const clickingTabs = new Set();
+const processingTabs = new Set();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type !== "SKIP_YOUTUBE_AD") {
@@ -26,22 +19,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (clickingTabs.has(tabId)) {
+  if (processingTabs.has(tabId)) {
     sendResponse({
       success: false,
       busy: true,
-      message: "正在執行略過操作"
+      message: "略過操作執行中"
     });
 
     return true;
   }
 
-  clickingTabs.add(tabId);
+  processingTabs.add(tabId);
 
   skipYouTubeAd(tabId, message.selector)
-    .then((result) => {
-      sendResponse(result);
-    })
+    .then(sendResponse)
     .catch((error) => {
       sendResponse({
         success: false,
@@ -49,29 +40,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     })
     .finally(() => {
-      clickingTabs.delete(tabId);
+      processingTabs.delete(tabId);
     });
 
   return true;
 });
 
-/**
- * 使用 Debugger API：
- *
- * 1. 附加 debugger。
- * 2. 在 YouTube 頁面中尋找略過按鈕。
- * 3. 保存目前捲動位置。
- * 4. 將略過按鈕捲入畫面。
- * 5. 重新取得按鈕位置。
- * 6. 使用 Input.dispatchMouseEvent 點擊。
- * 7. 恢復原本捲動位置。
- */
-async function skipYouTubeAd(tabId, selector) {
+async function skipYouTubeAd(tabId, suppliedSelector) {
   const target = { tabId };
 
   await ensureDebuggerAttached(tabId);
 
-  const buttonInfo = await findAndPrepareButton(target, selector);
+  const buttonInfo = await findSkipButton(target, suppliedSelector);
 
   if (!buttonInfo.found) {
     return {
@@ -80,48 +60,64 @@ async function skipYouTubeAd(tabId, selector) {
     };
   }
 
-  if (
-    !Number.isFinite(buttonInfo.x) ||
-    !Number.isFinite(buttonInfo.y)
-  ) {
+  /*
+   * 按鈕位於目前 viewport 內時，
+   * 使用原本已成功的 Debugger 滑鼠點擊。
+   */
+  if (buttonInfo.inViewport) {
+    await dispatchMouseClick(
+      target,
+      buttonInfo.x,
+      buttonInfo.y
+    );
+
     return {
-      success: false,
-      message: "略過按鈕座標無效"
+      success: true,
+      method: "debugger-mouse",
+      message: "已使用 Debugger 滑鼠事件略過",
+      buttonText: buttonInfo.text || ""
     };
   }
 
-  await dispatchMouseClick(target, buttonInfo.x, buttonInfo.y);
-
-  await wait(100);
-
-  await restoreScrollPosition(
+  /*
+   * 按鈕位於畫面外時，不再 scrollIntoView。
+   * 直接在頁面主要執行環境中對節點送出事件。
+   */
+  const runtimeResult = await clickOutsideViewport(
     target,
-    buttonInfo.scrollX,
-    buttonInfo.scrollY
+    buttonInfo.selector
   );
+
+  if (!runtimeResult.success) {
+    return {
+      success: false,
+      message:
+        runtimeResult.message ||
+        "畫面外按鈕點擊失敗"
+    };
+  }
 
   return {
     success: true,
-    message: "已送出 Debugger 點擊",
-    buttonText: buttonInfo.text || "",
-    selector: buttonInfo.selector || ""
+    method: "runtime-event",
+    message: "已略過畫面外的廣告",
+    buttonText: runtimeResult.text || buttonInfo.text || ""
   };
 }
 
 /**
- * 在頁面主要執行環境中尋找按鈕。
- *
- * 先使用 Content Script 傳來的 selector，
- * 找不到時再透過常見 selector 和按鈕文字搜尋。
+ * 在 Chrome 頁面主要執行環境尋找略過按鈕。
  */
-async function findAndPrepareButton(target, selector) {
-  const safeSelector = JSON.stringify(selector || "");
+async function findSkipButton(target, suppliedSelector) {
+  const safeSelector = JSON.stringify(
+    suppliedSelector || ""
+  );
 
   const expression = `
     (() => {
       const suppliedSelector = ${safeSelector};
 
-      const getElementText = (element) => {
+      const getText = (element) => {
         if (!element) {
           return "";
         }
@@ -138,33 +134,19 @@ async function findAndPrepareButton(target, selector) {
           .trim();
       };
 
-      const isUsable = (element) => {
-        if (!element) {
-          return false;
-        }
-
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          Number(style.opacity) > 0 &&
-          !element.disabled &&
-          element.getAttribute("aria-disabled") !== "true"
-        );
-      };
-
       const isSkipButton = (element) => {
         if (!element) {
           return false;
         }
 
-        const id = String(element.id || "").toLowerCase();
-        const className = String(element.className || "").toLowerCase();
-        const text = getElementText(element).toLowerCase();
+        const id =
+          String(element.id || "").toLowerCase();
+
+        const className =
+          String(element.className || "").toLowerCase();
+
+        const text =
+          getText(element).toLowerCase();
 
         return (
           id.includes("skip-button") ||
@@ -178,19 +160,67 @@ async function findAndPrepareButton(target, selector) {
         );
       };
 
+      const isUsable = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) > 0 &&
+          !element.disabled &&
+          element.getAttribute("aria-disabled") !== "true"
+        );
+      };
+
+      const buildSelector = (element) => {
+        if (!element) {
+          return "";
+        }
+
+        if (element.id) {
+          return "#" + CSS.escape(element.id);
+        }
+
+        const tag =
+          element.tagName.toLowerCase();
+
+        const classes =
+          Array.from(element.classList)
+            .filter(Boolean)
+            .slice(0, 5)
+            .map((name) => CSS.escape(name));
+
+        if (classes.length > 0) {
+          return tag + "." + classes.join(".");
+        }
+
+        return tag;
+      };
+
       let button = null;
       let matchedSelector = "";
 
       if (suppliedSelector) {
         try {
-          const selectedElement = document.querySelector(suppliedSelector);
+          const candidate =
+            document.querySelector(suppliedSelector);
 
-          if (isUsable(selectedElement) && isSkipButton(selectedElement)) {
-            button = selectedElement;
+          if (
+            isUsable(candidate) &&
+            isSkipButton(candidate)
+          ) {
+            button = candidate;
             matchedSelector = suppliedSelector;
           }
         } catch (error) {
-          // selector 無效時改用備用搜尋。
+          // 忽略無效 selector。
         }
       }
 
@@ -210,13 +240,17 @@ async function findAndPrepareButton(target, selector) {
           "button[aria-label*='跳過']"
         ];
 
-        for (const currentSelector of selectors) {
-          const elements = document.querySelectorAll(currentSelector);
+        for (const selector of selectors) {
+          const elements =
+            document.querySelectorAll(selector);
 
           for (const element of elements) {
-            if (isUsable(element) && isSkipButton(element)) {
+            if (
+              isUsable(element) &&
+              isSkipButton(element)
+            ) {
               button = element;
-              matchedSelector = currentSelector;
+              matchedSelector = selector;
               break;
             }
           }
@@ -228,14 +262,19 @@ async function findAndPrepareButton(target, selector) {
       }
 
       if (!button) {
-        const candidates = document.querySelectorAll(
-          "button, tp-yt-paper-button, [role='button']"
-        );
+        const candidates =
+          document.querySelectorAll(
+            "button, tp-yt-paper-button, [role='button']"
+          );
 
         for (const element of candidates) {
-          if (isUsable(element) && isSkipButton(element)) {
+          if (
+            isUsable(element) &&
+            isSkipButton(element)
+          ) {
             button = element;
-            matchedSelector = "文字或屬性搜尋";
+            matchedSelector =
+              buildSelector(element);
             break;
           }
         }
@@ -244,31 +283,30 @@ async function findAndPrepareButton(target, selector) {
       if (!button) {
         return {
           found: false,
-          message: "Debugger 頁面環境找不到略過廣告按鈕"
+          message: "找不到可用的略過按鈕"
         };
       }
 
-      const scrollX = window.scrollX;
-      const scrollY = window.scrollY;
+      const rect =
+        button.getBoundingClientRect();
 
-      button.scrollIntoView({
-        block: "center",
-        inline: "center",
-        behavior: "instant"
-      });
-
-      const rect = button.getBoundingClientRect();
+      const inViewport =
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth;
 
       return {
         found: true,
+        selector:
+          matchedSelector ||
+          buildSelector(button),
+        text: getText(button),
         x: rect.left + rect.width / 2,
         y: rect.top + rect.height / 2,
         width: rect.width,
         height: rect.height,
-        scrollX,
-        scrollY,
-        text: getElementText(button),
-        selector: matchedSelector
+        inViewport
       };
     })()
   `;
@@ -283,21 +321,251 @@ async function findAndPrepareButton(target, selector) {
     }
   );
 
-  const value = result?.result?.value;
-
-  if (!value) {
-    return {
-      found: false,
-      message: "無法取得略過按鈕資訊"
-    };
-  }
-
-  return value;
+  return result?.result?.value || {
+    found: false,
+    message: "無法取得略過按鈕資訊"
+  };
 }
 
 /**
- * 發送接近真實滑鼠操作的事件。
+ * 畫面外按鈕不使用座標。
+ *
+ * 依序嘗試：
+ * 1. pointer 事件
+ * 2. mouse 事件
+ * 3. 原生 click()
  */
+async function clickOutsideViewport(target, selector) {
+  const safeSelector = JSON.stringify(selector || "");
+
+  const expression = `
+    (() => {
+      const suppliedSelector = ${safeSelector};
+
+      const getText = (element) => {
+        if (!element) {
+          return "";
+        }
+
+        return [
+          element.innerText,
+          element.textContent,
+          element.getAttribute("aria-label"),
+          element.getAttribute("title")
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .replace(/\\s+/g, " ")
+          .trim();
+      };
+
+      const isSkipButton = (element) => {
+        if (!element) {
+          return false;
+        }
+
+        const id =
+          String(element.id || "").toLowerCase();
+
+        const className =
+          String(element.className || "").toLowerCase();
+
+        const text =
+          getText(element).toLowerCase();
+
+        return (
+          id.includes("skip-button") ||
+          className.includes("ytp-ad-skip") ||
+          className.includes("ytp-skip-ad") ||
+          text.includes("skip ad") ||
+          text.includes("skip ads") ||
+          text.includes("略過廣告") ||
+          text.includes("略過這則廣告") ||
+          text.includes("跳過廣告")
+        );
+      };
+
+      let button = null;
+
+      if (suppliedSelector) {
+        try {
+          const candidate =
+            document.querySelector(suppliedSelector);
+
+          if (isSkipButton(candidate)) {
+            button = candidate;
+          }
+        } catch (error) {
+          // 改用備用搜尋。
+        }
+      }
+
+      if (!button) {
+        const selectors = [
+          "button[id*='skip-button']",
+          "[id*='skip-button']",
+          "button.ytp-ad-skip-button",
+          "button.ytp-ad-skip-button-modern",
+          ".ytp-ad-skip-button",
+          ".ytp-ad-skip-button-modern",
+          ".ytp-skip-ad-button",
+          ".ytp-ad-skip-button-container button"
+        ];
+
+        for (const selector of selectors) {
+          const elements =
+            document.querySelectorAll(selector);
+
+          for (const element of elements) {
+            if (isSkipButton(element)) {
+              button = element;
+              break;
+            }
+          }
+
+          if (button) {
+            break;
+          }
+        }
+      }
+
+      if (!button) {
+        const candidates =
+          document.querySelectorAll(
+            "button, tp-yt-paper-button, [role='button']"
+          );
+
+        for (const element of candidates) {
+          if (isSkipButton(element)) {
+            button = element;
+            break;
+          }
+        }
+      }
+
+      if (!button) {
+        return {
+          success: false,
+          message: "執行點擊時按鈕已不存在"
+        };
+      }
+
+      const eventOptions = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        button: 0,
+        buttons: 1,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true
+      };
+
+      try {
+        button.focus({
+          preventScroll: true
+        });
+      } catch (error) {
+        button.focus();
+      }
+
+      try {
+        button.dispatchEvent(
+          new PointerEvent(
+            "pointerover",
+            eventOptions
+          )
+        );
+
+        button.dispatchEvent(
+          new PointerEvent(
+            "pointerenter",
+            eventOptions
+          )
+        );
+
+        button.dispatchEvent(
+          new PointerEvent(
+            "pointerdown",
+            eventOptions
+          )
+        );
+      } catch (error) {
+        // 某些環境可能不支援 PointerEvent。
+      }
+
+      button.dispatchEvent(
+        new MouseEvent(
+          "mouseover",
+          eventOptions
+        )
+      );
+
+      button.dispatchEvent(
+        new MouseEvent(
+          "mouseenter",
+          eventOptions
+        )
+      );
+
+      button.dispatchEvent(
+        new MouseEvent(
+          "mousedown",
+          eventOptions
+        )
+      );
+
+      button.dispatchEvent(
+        new MouseEvent(
+          "mouseup",
+          {
+            ...eventOptions,
+            buttons: 0
+          }
+        )
+      );
+
+      try {
+        button.dispatchEvent(
+          new PointerEvent(
+            "pointerup",
+            {
+              ...eventOptions,
+              buttons: 0
+            }
+          )
+        );
+      } catch (error) {
+        // 忽略。
+      }
+
+      button.click();
+
+      return {
+        success: true,
+        text: getText(button)
+      };
+    })()
+  `;
+
+  const result = await sendDebuggerCommand(
+    target,
+    "Runtime.evaluate",
+    {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: true
+    }
+  );
+
+  return result?.result?.value || {
+    success: false,
+    message: "Runtime.evaluate 沒有回傳結果"
+  };
+}
+
 async function dispatchMouseClick(target, x, y) {
   await sendDebuggerCommand(
     target,
@@ -311,7 +579,7 @@ async function dispatchMouseClick(target, x, y) {
     }
   );
 
-  await wait(30);
+  await wait(20);
 
   await sendDebuggerCommand(
     target,
@@ -327,7 +595,7 @@ async function dispatchMouseClick(target, x, y) {
     }
   );
 
-  await wait(30);
+  await wait(20);
 
   await sendDebuggerCommand(
     target,
@@ -344,42 +612,6 @@ async function dispatchMouseClick(target, x, y) {
   );
 }
 
-/**
- * 點擊後恢復使用者原本的頁面位置。
- */
-async function restoreScrollPosition(target, scrollX, scrollY) {
-  if (
-    !Number.isFinite(scrollX) ||
-    !Number.isFinite(scrollY)
-  ) {
-    return;
-  }
-
-  const expression = `
-    window.scrollTo({
-      left: ${scrollX},
-      top: ${scrollY},
-      behavior: "instant"
-    });
-  `;
-
-  try {
-    await sendDebuggerCommand(
-      target,
-      "Runtime.evaluate",
-      {
-        expression,
-        returnByValue: true
-      }
-    );
-  } catch (error) {
-    console.warn("無法恢復頁面捲動位置：", error);
-  }
-}
-
-/**
- * 確認 Debugger 已附加到指定分頁。
- */
 async function ensureDebuggerAttached(tabId) {
   if (attachedTabs.has(tabId)) {
     return;
@@ -394,8 +626,10 @@ async function ensureDebuggerAttached(tabId) {
     const message = error.message || "";
 
     if (
-      message.includes("Another debugger is already attached") ||
-      message.includes("Already attached")
+      message.includes("Already attached") ||
+      message.includes(
+        "Another debugger is already attached"
+      )
     ) {
       attachedTabs.add(tabId);
       return;
@@ -424,7 +658,11 @@ function attachDebugger(target) {
   });
 }
 
-function sendDebuggerCommand(target, method, params = {}) {
+function sendDebuggerCommand(
+  target,
+  method,
+  params = {}
+) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand(
       target,
@@ -450,20 +688,14 @@ function wait(milliseconds) {
   });
 }
 
-/**
- * Debugger 被 Chrome、使用者或其他工具中斷時清除紀錄。
- */
 chrome.debugger.onDetach.addListener((source) => {
   if (source.tabId) {
     attachedTabs.delete(source.tabId);
-    clickingTabs.delete(source.tabId);
+    processingTabs.delete(source.tabId);
   }
 });
 
-/**
- * 分頁關閉時清除紀錄。
- */
 chrome.tabs.onRemoved.addListener((tabId) => {
   attachedTabs.delete(tabId);
-  clickingTabs.delete(tabId);
+  processingTabs.delete(tabId);
 });
