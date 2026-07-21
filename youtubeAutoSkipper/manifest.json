@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Ad Skipper",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "偵測 YouTube 可略過廣告，並使用 Chrome Debugger API 自動略過。",
   "permissions": [
     "storage",
