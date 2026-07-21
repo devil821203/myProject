@@ -1,16 +1,53 @@
 const DEBUGGER_VERSION = "1.3";
 
+const LOG_STORAGE_KEY = "youtubeAutoSkipperLogs";
+const MAX_LOG_COUNT = 300;
+
 const attachedTabs = new Set();
 const processingTabs = new Set();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "CLEAR_LOGS") {
+    clearLogs()
+      .then(() => {
+        sendResponse({
+          success: true
+        });
+      })
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          message: error.message || String(error)
+        });
+      });
+
+    return true;
+  }
+
   if (message.type !== "SKIP_YOUTUBE_AD") {
     return false;
   }
 
   const tabId = sender.tab?.id;
 
+  writeLog(
+    "INFO",
+    "background",
+    "收到略過廣告要求",
+    {
+      tabId,
+      selector: message.selector || "",
+      senderUrl: sender.tab?.url || ""
+    }
+  );
+
   if (!tabId) {
+    writeLog(
+      "ERROR",
+      "background",
+      "無法取得 YouTube 分頁 ID"
+    );
+
     sendResponse({
       success: false,
       message: "無法取得 YouTube 分頁 ID"
@@ -20,6 +57,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (processingTabs.has(tabId)) {
+    writeLog(
+      "WARN",
+      "background",
+      "分頁已有略過操作執行中",
+      {
+        tabId
+      }
+    );
+
     sendResponse({
       success: false,
       busy: true,
@@ -32,8 +78,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   processingTabs.add(tabId);
 
   skipYouTubeAd(tabId, message.selector)
-    .then(sendResponse)
+    .then((result) => {
+      writeLog(
+        result.success ? "INFO" : "WARN",
+        "background",
+        "略過操作完成",
+        {
+          tabId,
+          result
+        }
+      );
+
+      sendResponse(result);
+    })
     .catch((error) => {
+      writeLog(
+        "ERROR",
+        "background",
+        "略過操作發生例外",
+        {
+          tabId,
+          message: error.message || String(error),
+          stack: error.stack || ""
+        }
+      );
+
       sendResponse({
         success: false,
         message: error.message || String(error)
@@ -47,24 +116,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function skipYouTubeAd(tabId, suppliedSelector) {
-  const target = { tabId };
+  const target = {
+    tabId
+  };
+
+  await writeLog(
+    "INFO",
+    "background",
+    "準備附加 Debugger",
+    {
+      tabId,
+      suppliedSelector: suppliedSelector || ""
+    }
+  );
 
   await ensureDebuggerAttached(tabId);
 
-  const buttonInfo = await findSkipButton(target, suppliedSelector);
+  await writeLog(
+    "INFO",
+    "background",
+    "Debugger 已附加",
+    {
+      tabId
+    }
+  );
+
+  const buttonInfo = await findSkipButton(
+    target,
+    suppliedSelector
+  );
+
+  await writeLog(
+    "INFO",
+    "background",
+    "Debugger 搜尋按鈕結果",
+    buttonInfo
+  );
 
   if (!buttonInfo.found) {
     return {
       success: false,
-      message: buttonInfo.message || "找不到略過廣告按鈕"
+      message:
+        buttonInfo.message ||
+        "找不到略過廣告按鈕"
     };
   }
 
-  /*
-   * 按鈕位於目前 viewport 內時，
-   * 使用原本已成功的 Debugger 滑鼠點擊。
-   */
   if (buttonInfo.inViewport) {
+    await writeLog(
+      "INFO",
+      "background",
+      "按鈕位於畫面內，使用滑鼠座標點擊",
+      {
+        x: buttonInfo.x,
+        y: buttonInfo.y,
+        selector: buttonInfo.selector,
+        text: buttonInfo.text
+      }
+    );
+
     await dispatchMouseClick(
       target,
       buttonInfo.x,
@@ -79,13 +189,28 @@ async function skipYouTubeAd(tabId, suppliedSelector) {
     };
   }
 
-  /*
-   * 按鈕位於畫面外時，不再 scrollIntoView。
-   * 直接在頁面主要執行環境中對節點送出事件。
-   */
+  await writeLog(
+    "INFO",
+    "background",
+    "按鈕位於畫面外，使用 Runtime 點擊",
+    {
+      selector: buttonInfo.selector,
+      text: buttonInfo.text,
+      x: buttonInfo.x,
+      y: buttonInfo.y
+    }
+  );
+
   const runtimeResult = await clickOutsideViewport(
     target,
     buttonInfo.selector
+  );
+
+  await writeLog(
+    runtimeResult.success ? "INFO" : "ERROR",
+    "background",
+    "畫面外 Runtime 點擊結果",
+    runtimeResult
   );
 
   if (!runtimeResult.success) {
@@ -100,14 +225,14 @@ async function skipYouTubeAd(tabId, suppliedSelector) {
   return {
     success: true,
     method: "runtime-event",
-    message: "已略過畫面外的廣告",
-    buttonText: runtimeResult.text || buttonInfo.text || ""
+    message: "已嘗試略過畫面外廣告",
+    buttonText:
+      runtimeResult.text ||
+      buttonInfo.text ||
+      ""
   };
 }
 
-/**
- * 在 Chrome 頁面主要執行環境尋找略過按鈕。
- */
 async function findSkipButton(target, suppliedSelector) {
   const safeSelector = JSON.stringify(
     suppliedSelector || ""
@@ -165,8 +290,11 @@ async function findSkipButton(target, suppliedSelector) {
           return false;
         }
 
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
+        const style =
+          window.getComputedStyle(element);
+
+        const rect =
+          element.getBoundingClientRect();
 
         return (
           rect.width > 0 &&
@@ -188,20 +316,24 @@ async function findSkipButton(target, suppliedSelector) {
           return "#" + CSS.escape(element.id);
         }
 
-        const tag =
+        const tagName =
           element.tagName.toLowerCase();
 
-        const classes =
+        const classNames =
           Array.from(element.classList)
             .filter(Boolean)
             .slice(0, 5)
-            .map((name) => CSS.escape(name));
+            .map((className) => CSS.escape(className));
 
-        if (classes.length > 0) {
-          return tag + "." + classes.join(".");
+        if (classNames.length > 0) {
+          return (
+            tagName +
+            "." +
+            classNames.join(".")
+          );
         }
 
-        return tag;
+        return tagName;
       };
 
       let button = null;
@@ -220,7 +352,6 @@ async function findSkipButton(target, suppliedSelector) {
             matchedSelector = suppliedSelector;
           }
         } catch (error) {
-          // 忽略無效 selector。
         }
       }
 
@@ -304,9 +435,19 @@ async function findSkipButton(target, suppliedSelector) {
         text: getText(button),
         x: rect.left + rect.width / 2,
         y: rect.top + rect.height / 2,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
         width: rect.width,
         height: rect.height,
-        inViewport
+        inViewport,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus()
       };
     })()
   `;
@@ -327,16 +468,10 @@ async function findSkipButton(target, suppliedSelector) {
   };
 }
 
-/**
- * 畫面外按鈕不使用座標。
- *
- * 依序嘗試：
- * 1. pointer 事件
- * 2. mouse 事件
- * 3. 原生 click()
- */
 async function clickOutsideViewport(target, selector) {
-  const safeSelector = JSON.stringify(selector || "");
+  const safeSelector = JSON.stringify(
+    selector || ""
+  );
 
   const expression = `
     (() => {
@@ -396,7 +531,6 @@ async function clickOutsideViewport(target, selector) {
             button = candidate;
           }
         } catch (error) {
-          // 改用備用搜尋。
         }
       }
 
@@ -409,7 +543,11 @@ async function clickOutsideViewport(target, selector) {
           ".ytp-ad-skip-button",
           ".ytp-ad-skip-button-modern",
           ".ytp-skip-ad-button",
-          ".ytp-ad-skip-button-container button"
+          ".ytp-ad-skip-button-container button",
+          "button[aria-label*='Skip']",
+          "button[aria-label*='skip']",
+          "button[aria-label*='略過']",
+          "button[aria-label*='跳過']"
         ];
 
         for (const selector of selectors) {
@@ -450,16 +588,28 @@ async function clickOutsideViewport(target, selector) {
         };
       }
 
+      const text = getText(button);
+
+      const rect =
+        button.getBoundingClientRect();
+
       const eventOptions = {
         bubbles: true,
         cancelable: true,
         composed: true,
         view: window,
+        detail: 1,
+        screenX: 0,
+        screenY: 0,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        ctrlKey: false,
+        altKey: false,
+        shiftKey: false,
+        metaKey: false,
         button: 0,
         buttons: 1,
-        pointerId: 1,
-        pointerType: "mouse",
-        isPrimary: true
+        relatedTarget: null
       };
 
       try {
@@ -467,44 +617,42 @@ async function clickOutsideViewport(target, selector) {
           preventScroll: true
         });
       } catch (error) {
-        button.focus();
+        try {
+          button.focus();
+        } catch (focusError) {
+        }
       }
 
       try {
         button.dispatchEvent(
           new PointerEvent(
             "pointerover",
-            eventOptions
-          )
-        );
-
-        button.dispatchEvent(
-          new PointerEvent(
-            "pointerenter",
-            eventOptions
+            {
+              ...eventOptions,
+              pointerId: 1,
+              pointerType: "mouse",
+              isPrimary: true
+            }
           )
         );
 
         button.dispatchEvent(
           new PointerEvent(
             "pointerdown",
-            eventOptions
+            {
+              ...eventOptions,
+              pointerId: 1,
+              pointerType: "mouse",
+              isPrimary: true
+            }
           )
         );
       } catch (error) {
-        // 某些環境可能不支援 PointerEvent。
       }
 
       button.dispatchEvent(
         new MouseEvent(
           "mouseover",
-          eventOptions
-        )
-      );
-
-      button.dispatchEvent(
-        new MouseEvent(
-          "mouseenter",
           eventOptions
         )
       );
@@ -532,19 +680,31 @@ async function clickOutsideViewport(target, selector) {
             "pointerup",
             {
               ...eventOptions,
-              buttons: 0
+              buttons: 0,
+              pointerId: 1,
+              pointerType: "mouse",
+              isPrimary: true
             }
           )
         );
       } catch (error) {
-        // 忽略。
       }
 
       button.click();
 
       return {
         success: true,
-        text: getText(button)
+        text,
+        rect: {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height
+        },
+        visibilityState:
+          document.visibilityState,
+        hasFocus:
+          document.hasFocus()
       };
     })()
   `;
@@ -579,7 +739,7 @@ async function dispatchMouseClick(target, x, y) {
     }
   );
 
-  await wait(20);
+  await wait(30);
 
   await sendDebuggerCommand(
     target,
@@ -595,7 +755,7 @@ async function dispatchMouseClick(target, x, y) {
     }
   );
 
-  await wait(20);
+  await wait(30);
 
   await sendDebuggerCommand(
     target,
@@ -617,13 +777,16 @@ async function ensureDebuggerAttached(tabId) {
     return;
   }
 
-  const target = { tabId };
+  const target = {
+    tabId
+  };
 
   try {
     await attachDebugger(target);
     attachedTabs.add(tabId);
   } catch (error) {
-    const message = error.message || "";
+    const message =
+      error.message || "";
 
     if (
       message.includes("Already attached") ||
@@ -645,10 +808,14 @@ function attachDebugger(target) {
       target,
       DEBUGGER_VERSION,
       () => {
-        const error = chrome.runtime.lastError;
+        const error =
+          chrome.runtime.lastError;
 
         if (error) {
-          reject(new Error(error.message));
+          reject(
+            new Error(error.message)
+          );
+
           return;
         }
 
@@ -669,10 +836,14 @@ function sendDebuggerCommand(
       method,
       params,
       (result) => {
-        const error = chrome.runtime.lastError;
+        const error =
+          chrome.runtime.lastError;
 
         if (error) {
-          reject(new Error(error.message));
+          reject(
+            new Error(error.message)
+          );
+
           return;
         }
 
@@ -688,12 +859,92 @@ function wait(milliseconds) {
   });
 }
 
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId) {
+async function writeLog(
+  level,
+  source,
+  message,
+  data = null
+) {
+  const logItem = {
+    time: new Date().toISOString(),
+    level,
+    source,
+    message,
+    data
+  };
+
+  const consoleMethod =
+    level === "ERROR"
+      ? console.error
+      : level === "WARN"
+        ? console.warn
+        : console.log;
+
+  consoleMethod(
+    `[YouTube Auto Skipper][${source}][${level}]`,
+    message,
+    data ?? ""
+  );
+
+  try {
+    const result =
+      await chrome.storage.local.get(
+        LOG_STORAGE_KEY
+      );
+
+    const logs =
+      Array.isArray(
+        result[LOG_STORAGE_KEY]
+      )
+        ? result[LOG_STORAGE_KEY]
+        : [];
+
+    logs.push(logItem);
+
+    if (logs.length > MAX_LOG_COUNT) {
+      logs.splice(
+        0,
+        logs.length - MAX_LOG_COUNT
+      );
+    }
+
+    await chrome.storage.local.set({
+      [LOG_STORAGE_KEY]: logs
+    });
+  } catch (error) {
+    console.error(
+      "寫入擴充功能 Log 失敗",
+      error
+    );
+  }
+}
+
+async function clearLogs() {
+  await chrome.storage.local.set({
+    [LOG_STORAGE_KEY]: []
+  });
+}
+
+chrome.debugger.onDetach.addListener(
+  (source, reason) => {
+    if (!source.tabId) {
+      return;
+    }
+
     attachedTabs.delete(source.tabId);
     processingTabs.delete(source.tabId);
+
+    writeLog(
+      "WARN",
+      "background",
+      "Debugger 已中斷",
+      {
+        tabId: source.tabId,
+        reason
+      }
+    );
   }
-});
+);
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   attachedTabs.delete(tabId);
