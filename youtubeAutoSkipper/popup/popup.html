@@ -2,9 +2,20 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
   <title>YouTube Auto Skipper</title>
-  <link rel="stylesheet" href="popup.css">
+
+  <link
+    rel="stylesheet"
+    href="popup.css"
+  >
 </head>
+
 <body>
   <main class="container">
     <h1>YouTube Auto Skipper</h1>
@@ -12,7 +23,11 @@
     <section class="card">
       <label class="switch-row">
         <span>啟用自動略過</span>
-        <input id="enabledToggle" type="checkbox">
+
+        <input
+          id="enabledToggle"
+          type="checkbox"
+        >
       </label>
     </section>
 
@@ -21,52 +36,133 @@
 
       <div class="status-row">
         <span>YouTube 分頁</span>
-        <strong id="youtubeStatus">讀取中</strong>
+        <strong id="youtubeStatus">
+          讀取中
+        </strong>
       </div>
 
       <div class="status-row">
         <span>播放器</span>
-        <strong id="playerStatus">讀取中</strong>
+        <strong id="playerStatus">
+          讀取中
+        </strong>
       </div>
 
       <div class="status-row">
         <span>廣告播放中</span>
-        <strong id="adStatus">讀取中</strong>
+        <strong id="adStatus">
+          讀取中
+        </strong>
       </div>
 
       <div class="status-row">
         <span>找到略過按鈕</span>
-        <strong id="foundSkipStatus">讀取中</strong>
+        <strong id="foundSkipStatus">
+          讀取中
+        </strong>
       </div>
 
       <div class="status-row">
         <span>可略過</span>
-        <strong id="skipStatus">讀取中</strong>
-      </div>
-      
-      <div class="status-row">
-        <span>按鈕文字</span>
-        <strong id="skipButtonText">無</strong>
-      </div>     
-
-      <div class="status-row">
-        <span>錯誤訊息</span>
-        <strong id="lastError">無</strong>
+        <strong id="skipStatus">
+          讀取中
+        </strong>
       </div>
 
       <div class="status-row">
         <span>已略過次數</span>
-        <strong id="skipCount">0</strong>
+        <strong id="skipCount">
+          0
+        </strong>
       </div>
 
-      <div class="status-message" id="lastAction">讀取中</div>
-      <div class="checked-time" id="lastSkipAt"></div>
-      <div class="checked-time" id="lastCheckedAt"></div>
+      <div class="detail-row">
+        <span>按鈕文字</span>
+        <p id="skipButtonText">
+          無
+        </p>
+      </div>
+
+      <div class="detail-row">
+        <span>符合規則</span>
+        <p id="matchedSelector">
+          無
+        </p>
+      </div>
+
+      <div
+        class="status-message"
+        id="lastAction"
+      >
+        讀取中
+      </div>
+
+      <div
+        class="error-message"
+        id="lastError"
+      ></div>
+
+      <div
+        class="checked-time"
+        id="lastSkipAt"
+      ></div>
+
+      <div
+        class="checked-time"
+        id="lastCheckedAt"
+      ></div>
     </section>
 
     <section class="card">
-      <button id="refreshButton">重新偵測</button>
-      <p id="statusText"></p>
+      <label for="intervalInput">
+        檢查間隔（毫秒）
+      </label>
+
+      <input
+        id="intervalInput"
+        type="number"
+        min="300"
+        step="100"
+      >
+
+      <button id="saveButton">
+        儲存設定
+      </button>
+
+      <button
+        id="refreshButton"
+        class="secondary"
+      >
+        重新偵測
+      </button>
+
+      <p id="saveStatus"></p>
+    </section>
+
+    <section class="card">
+      <h2>偵錯 Log</h2>
+
+      <div class="log-actions">
+        <button
+          id="refreshLogsButton"
+          class="secondary"
+        >
+          重新整理 Log
+        </button>
+
+        <button
+          id="clearLogsButton"
+          class="danger"
+        >
+          清除 Log
+        </button>
+      </div>
+
+      <textarea
+        id="logOutput"
+        readonly
+        spellcheck="false"
+      ></textarea>
     </section>
   </main>
 
