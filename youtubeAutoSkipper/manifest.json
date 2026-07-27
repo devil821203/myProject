@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Ad Skipper",
-  "version": "3.0.0",
-  "description": "使用 Chrome DevTools Protocol 偵測並點擊 YouTube 的略過廣告按鈕。",
+  "version": "3.1.0",
+  "description": "使用 Chrome DevTools Protocol 自動偵測並點擊 YouTube 的略過廣告按鈕，支援一般使用者與開發者 Popup 模式。",
   "permissions": [
     "storage",
     "tabs",

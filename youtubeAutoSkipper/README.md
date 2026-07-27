@@ -71,3 +71,48 @@ Service Worker
 - 開啟 Chrome DevTools 時，可能與擴充功能的 debugger attachment 衝突。
 - Chrome 或 YouTube 更新後，可能需要調整 CDP 行為或 selector。
 - Manifest V3 service worker 可能由 Chrome 暫停；擴充功能會在分頁事件、Popup 操作或重新啟動時恢復監控。
+
+## Popup 顯示模式
+
+Popup 提供兩種顯示模式，透過下列參數檔切換：
+
+```text
+config/app-config.js
+```
+
+一般使用者模式：
+
+```javascript
+globalThis.YOUTUBE_AUTO_SKIPPER_CONFIG = Object.freeze({
+  mode: "user"
+});
+```
+
+此模式只顯示：
+
+- 自動略過功能開關
+- 簡化的執行狀態
+- 目前分頁是否為 YouTube
+- 累計略過次數
+- 上次略過時間
+- 立即重新偵測按鈕
+
+開發者模式：
+
+```javascript
+globalThis.YOUTUBE_AUTO_SKIPPER_CONFIG = Object.freeze({
+  mode: "developer"
+});
+```
+
+此模式額外顯示：
+
+- CDP 偵測詳細狀態
+- 播放器與廣告狀態
+- 命中的按鈕 selector
+- 按鈕文字
+- 檢查間隔設定
+- 手動重新偵測
+- 偵錯 Log 檢視與清除功能
+
+修改參數後，請到 `chrome://extensions/` 對擴充功能按下「重新載入」。
