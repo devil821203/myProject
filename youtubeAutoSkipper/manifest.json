@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Ad Skipper",
-  "version": "3.2.0",
-  "description": "使用頁面偵測搭配短暫 Chrome DevTools Protocol 點擊，自動略過 YouTube 廣告；避免長時間顯示偵錯提示。",
+  "version": "3.3.0",
+  "description": "以事件驅動 Content Script 搭配短暫 CDP 點擊，自動略過前景或背景 YouTube 分頁中的可略過廣告。",
   "permissions": [
     "storage",
     "tabs",

@@ -1,7 +1,7 @@
 "use strict";
 
 const DEBUGGER_VERSION = "1.3";
-const DEFAULT_SETTINGS = { enabled: true, checkIntervalMs: 500 };
+const DEFAULT_SETTINGS = { enabled: true, checkIntervalMs: 1000 };
 const LOG_STORAGE_KEY = "youtubeAutoSkipperLogs";
 const STATUS_STORAGE_KEY = "youtubeAutoSkipperStatus";
 const MAX_LOG_COUNT = 300;
@@ -33,9 +33,27 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   processingTabs.delete(tabId);
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "loading" && isYouTubeUrl(tab.url)) {
+    const session = getSession(tabId);
+    updateSession(session, {
+      hasPlayer: false,
+      isAdPlaying: false,
+      foundSkipButton: false,
+      canSkip: false,
+      lastAction: "YouTube 頁面載入中",
+      lastError: ""
+    });
+    persistStatus().catch(() => {});
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    const tabId = sender.tab?.id ?? Number(message?.tabId);
+    const senderTabId = sender.tab?.id;
+    const requestedTabId = Number(message?.tabId);
+    const tabId = Number.isInteger(senderTabId) ? senderTabId : requestedTabId;
+
     switch (message?.type) {
       case "PAGE_STATE": {
         if (!Number.isInteger(tabId)) return sendResponse({ success: false });
@@ -47,53 +65,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           canSkip: Boolean(message.foundSkipButton),
           skipButtonText: message.skipButtonText || "",
           matchedSelector: message.matchedSelector || "",
+          pageVisibility: message.pageVisibility || "unknown",
           lastCheckedAt: new Date().toISOString(),
           lastAction: message.foundSkipButton
-            ? "偵測到略過按鈕，準備使用 CDP 點擊"
+            ? "偵測到略過按鈕，準備使用短暫 CDP 點擊"
             : (message.isAdPlaying ? "廣告播放中，等待略過按鈕" : "目前沒有可略過廣告"),
           lastError: ""
         });
         await persistStatus();
-        sendResponse({ success: true });
-        break;
+        return sendResponse({ success: true });
       }
+
       case "SKIP_CANDIDATE": {
         if (!Number.isInteger(tabId)) return sendResponse({ success: false });
         const result = await clickCandidateWithTransientCdp(tabId, false);
-        sendResponse({ success: true, result });
-        break;
+        return sendResponse({ success: true, result });
       }
+
       case "OVERLAY_CANDIDATE": {
         if (!Number.isInteger(tabId)) return sendResponse({ success: false });
         const result = await clickCandidateWithTransientCdp(tabId, true);
-        sendResponse({ success: true, result });
-        break;
+        return sendResponse({ success: true, result });
       }
-      case "GET_TAB_STATUS": {
-        sendResponse(await getPublicStatus(Number(message.tabId)));
-        break;
-      }
+
+      case "GET_TAB_STATUS":
+        return sendResponse(await getPublicStatus(requestedTabId));
+
       case "FORCE_SCAN": {
-        const forcedTabId = Number(message.tabId);
-        const result = await clickCandidateWithTransientCdp(forcedTabId, false, true);
-        sendResponse({ success: true, result, status: await getPublicStatus(forcedTabId) });
-        break;
+        const result = await clickCandidateWithTransientCdp(requestedTabId, false, true);
+        return sendResponse({ success: true, result, status: await getPublicStatus(requestedTabId) });
       }
+
       case "SETTINGS_UPDATED": {
         const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/*", "https://youtube.com/*"] });
-        await Promise.allSettled(tabs.filter(t => t.id).map(t => chrome.tabs.sendMessage(t.id, { type: "SETTINGS_UPDATED" })));
-        sendResponse({ success: true });
-        break;
+        await Promise.allSettled(
+          tabs.filter((tab) => Number.isInteger(tab.id))
+            .map((tab) => chrome.tabs.sendMessage(tab.id, { type: "SETTINGS_UPDATED" }))
+        );
+        return sendResponse({ success: true });
       }
-      case "CLEAR_LOGS": {
+
+      case "CLEAR_LOGS":
         await chrome.storage.local.set({ [LOG_STORAGE_KEY]: [] });
-        sendResponse({ success: true });
-        break;
-      }
+        return sendResponse({ success: true });
+
       default:
-        sendResponse({ success: false, message: "未知訊息" });
+        return sendResponse({ success: false, message: "未知訊息" });
     }
-  })().catch((error) => sendResponse({ success: false, message: error?.message || String(error) }));
+  })().catch((error) => {
+    sendResponse({ success: false, message: error?.message || String(error) });
+  });
+
   return true;
 });
 
@@ -109,6 +131,7 @@ function getSession(tabId) {
       canSkip: false,
       skipButtonText: "",
       matchedSelector: "",
+      pageVisibility: "unknown",
       lastAction: "等待頁面偵測",
       lastError: "",
       lastSkipAt: "",
@@ -126,21 +149,34 @@ async function clickCandidateWithTransientCdp(tabId, overlayOnly = false, force 
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
   if (!settings.enabled && !force) return { disabled: true };
 
+  const tab = await chrome.tabs.get(tabId);
+  if (!isYouTubeUrl(tab.url)) return { ignored: true, reason: "not-youtube" };
+  if (tab.discarded) {
+    const session = getSession(tabId);
+    session.lastAction = "分頁已被 Chrome 記憶體節省功能卸載，無法略過";
+    session.lastError = "tab.discarded = true";
+    await persistStatus();
+    return { discarded: true };
+  }
+
   processingTabs.add(tabId);
   const session = getSession(tabId);
   let attachedByUs = false;
+  let originalScroll = null;
+
   try {
     attachedByUs = await attachDebugger(tabId);
-    const root = await getDocumentRoot(tabId);
     const selectors = overlayOnly ? CLOSE_SELECTORS : SKIP_SELECTORS;
-    const found = await queryFirstWithSelector(tabId, root.nodeId, selectors);
 
+    let found = await findNode(tabId, selectors);
     if (!found) {
       session.lastAction = overlayOnly ? "找不到廣告覆蓋層" : "略過按鈕已消失或尚未出現";
       return { found: false };
     }
 
-    const info = await getNodeInfo(tabId, found.nodeId);
+    let info = await getNodeInfo(tabId, found.nodeId);
+    originalScroll = info.scroll;
+
     updateSession(session, {
       foundSkipButton: !overlayOnly,
       canSkip: info.clickable,
@@ -150,7 +186,20 @@ async function clickCandidateWithTransientCdp(tabId, overlayOnly = false, force 
     });
 
     if (!info.clickable) {
-      session.lastAction = "找到按鈕，但目前不在可點擊區域";
+      await scrollNodeIntoView(tabId, found.nodeId);
+      await sleep(80);
+
+      // YouTube 可能在捲動或版面切換時重建按鈕，因此重新查詢。
+      found = await findNode(tabId, selectors);
+      if (!found) {
+        session.lastAction = "按鈕移入可見區域時已被頁面重建或移除";
+        return { found: false, afterScroll: true };
+      }
+      info = await getNodeInfo(tabId, found.nodeId);
+    }
+
+    if (!info.clickable) {
+      session.lastAction = "找到按鈕，但無法取得可點擊的畫面座標";
       return { found: true, clickable: false };
     }
 
@@ -158,31 +207,55 @@ async function clickCandidateWithTransientCdp(tabId, overlayOnly = false, force 
 
     if (overlayOnly) {
       session.lastAction = "已關閉廣告覆蓋層";
-      await writeLog("INFO", "cdp", "關閉廣告覆蓋層", { tabId, selector: found.selector });
+      await writeLog("INFO", "cdp", "關閉廣告覆蓋層", {
+        tabId,
+        selector: found.selector,
+        backgroundTab: !tab.active
+      });
       return { found: true, clicked: true };
     }
 
-    const skipped = await verifyAdEnded(tabId, 1200);
+    const skipped = await verifyAdEnded(tabId, 1800);
     if (skipped) {
       session.skipCount += 1;
       session.lastSkipAt = new Date().toISOString();
-      session.lastAction = "已使用短暫 CDP 連線略過廣告";
+      session.lastAction = tab.active
+        ? "已使用短暫 CDP 連線略過廣告"
+        : "已在背景分頁使用短暫 CDP 連線略過廣告";
       session.lastError = "";
+      session.isAdPlaying = false;
+      session.foundSkipButton = false;
+      session.canSkip = false;
+
       await writeLog("INFO", "cdp", "略過廣告成功", {
-        tabId, selector: found.selector, x: info.x, y: info.y, text: info.text
+        tabId,
+        selector: found.selector,
+        x: info.x,
+        y: info.y,
+        text: info.text,
+        backgroundTab: !tab.active,
+        windowId: tab.windowId
       });
     } else {
       session.lastAction = "已送出 CDP 點擊，但廣告仍在播放";
       session.lastError = "CDP 點擊後驗證失敗";
-      await writeLog("WARN", "cdp", "略過後驗證失敗", { tabId, selector: found.selector });
+      await writeLog("WARN", "cdp", "略過後驗證失敗", {
+        tabId,
+        selector: found.selector,
+        backgroundTab: !tab.active
+      });
     }
-    return { found: true, clicked: true, skipped };
+
+    return { found: true, clicked: true, skipped, backgroundTab: !tab.active };
   } catch (error) {
     session.lastError = error?.message || String(error);
     session.lastAction = "CDP 點擊失敗";
     await logError(tabId, "短暫 CDP 操作失敗", error);
     throw error;
   } finally {
+    if (originalScroll) {
+      await restoreScroll(tabId, originalScroll).catch(() => {});
+    }
     await persistStatus();
     if (attachedByUs) await detachDebugger(tabId);
     processingTabs.delete(tabId);
@@ -212,17 +285,9 @@ async function detachDebugger(tabId) {
   } catch (_) {}
 }
 
-async function getDocumentRoot(tabId) {
-  const result = await sendCommand(tabId, "DOM.getDocument", { depth: 1, pierce: true });
-  return result.root;
-}
-
-async function queryFirst(tabId, rootNodeId, selectors) {
-  const found = await queryFirstWithSelector(tabId, rootNodeId, selectors);
-  return found?.nodeId || 0;
-}
-
-async function queryFirstWithSelector(tabId, rootNodeId, selectors) {
+async function findNode(tabId, selectors) {
+  const rootResult = await sendCommand(tabId, "DOM.getDocument", { depth: 1, pierce: true });
+  const rootNodeId = rootResult.root.nodeId;
   for (const selector of selectors) {
     const result = await sendCommand(tabId, "DOM.querySelector", { nodeId: rootNodeId, selector });
     if (result.nodeId) return { nodeId: result.nodeId, selector };
@@ -233,7 +298,9 @@ async function queryFirstWithSelector(tabId, rootNodeId, selectors) {
 async function getNodeInfo(tabId, nodeId) {
   const resolved = await sendCommand(tabId, "DOM.resolveNode", { nodeId });
   const objectId = resolved.object?.objectId;
-  if (!objectId) return { clickable: false, text: "", x: 0, y: 0 };
+  if (!objectId) {
+    return { clickable: false, text: "", x: 0, y: 0, scroll: null };
+  }
 
   const result = await sendCommand(tabId, "Runtime.callFunctionOn", {
     objectId,
@@ -255,9 +322,13 @@ async function getNodeInfo(tabId, nodeId) {
         y: top + height / 2,
         width,
         height,
+        rectWidth: r.width,
+        rectHeight: r.height,
         connected: this.isConnected,
         disabled: Boolean(this.disabled) || this.getAttribute('aria-disabled') === 'true',
-        visible: s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0
+        visible: s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0,
+        scrollX,
+        scrollY
       };
     }`
   });
@@ -267,14 +338,58 @@ async function getNodeInfo(tabId, nodeId) {
     text: value.text || "",
     x: Number(value.x || 0),
     y: Number(value.y || 0),
-    clickable: Boolean(value.connected && value.visible && !value.disabled && value.width >= 4 && value.height >= 4)
+    clickable: Boolean(
+      value.connected &&
+      value.visible &&
+      !value.disabled &&
+      value.width >= 4 &&
+      value.height >= 4
+    ),
+    existsAndVisible: Boolean(
+      value.connected &&
+      value.visible &&
+      value.rectWidth >= 4 &&
+      value.rectHeight >= 4
+    ),
+    scroll: {
+      x: Number(value.scrollX || 0),
+      y: Number(value.scrollY || 0)
+    }
   };
+}
+
+async function scrollNodeIntoView(tabId, nodeId) {
+  try {
+    await sendCommand(tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
+  } catch (_) {
+    const resolved = await sendCommand(tabId, "DOM.resolveNode", { nodeId });
+    const objectId = resolved.object?.objectId;
+    if (!objectId) return;
+    await sendCommand(tabId, "Runtime.callFunctionOn", {
+      objectId,
+      awaitPromise: true,
+      returnByValue: true,
+      functionDeclaration: `async function () {
+        this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return true;
+      }`
+    });
+  }
+}
+
+async function restoreScroll(tabId, scroll) {
+  await sendCommand(tabId, "Runtime.evaluate", {
+    expression: `window.scrollTo(${JSON.stringify(scroll.x)}, ${JSON.stringify(scroll.y)})`,
+    returnByValue: true
+  });
 }
 
 async function nodeHasAnyClass(tabId, nodeId, classNames) {
   const resolved = await sendCommand(tabId, "DOM.resolveNode", { nodeId });
   const objectId = resolved.object?.objectId;
   if (!objectId) return false;
+
   const result = await sendCommand(tabId, "Runtime.callFunctionOn", {
     objectId,
     returnByValue: true,
@@ -296,11 +411,15 @@ async function verifyAdEnded(tabId, timeoutMs) {
   while (Date.now() < end) {
     await sleep(120);
     try {
-      const root = await getDocumentRoot(tabId);
-      const playerNodeId = await queryFirst(tabId, root.nodeId, ["#movie_player"]);
-      if (!playerNodeId) return true;
-      const adPlaying = await nodeHasAnyClass(tabId, playerNodeId, ["ad-showing", "ad-interrupting"]);
-      const skipStillExists = await queryFirst(tabId, root.nodeId, SKIP_SELECTORS);
+      const root = await sendCommand(tabId, "DOM.getDocument", { depth: 1, pierce: true });
+      const playerResult = await sendCommand(tabId, "DOM.querySelector", {
+        nodeId: root.root.nodeId,
+        selector: "#movie_player"
+      });
+
+      if (!playerResult.nodeId) return true;
+      const adPlaying = await nodeHasAnyClass(tabId, playerResult.nodeId, ["ad-showing", "ad-interrupting"]);
+      const skipStillExists = await findNode(tabId, SKIP_SELECTORS);
       if (!adPlaying || !skipStillExists) return true;
     } catch (_) {}
   }
@@ -316,15 +435,19 @@ async function getPublicStatus(tabId) {
   try { tab = await chrome.tabs.get(tabId); } catch (_) {}
   const session = sessions.get(tabId);
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+
   return {
     enabled: settings.enabled,
     isYouTube: Boolean(tab && isYouTubeUrl(tab.url)),
+    discarded: Boolean(tab?.discarded),
+    active: Boolean(tab?.active),
     hasPlayer: session?.hasPlayer || false,
     isAdPlaying: session?.isAdPlaying || false,
     foundSkipButton: session?.foundSkipButton || false,
     canSkip: session?.canSkip || false,
     skipButtonText: session?.skipButtonText || "",
     matchedSelector: session?.matchedSelector || "",
+    pageVisibility: session?.pageVisibility || "unknown",
     skipCount: session?.skipCount || 0,
     lastAction: session?.lastAction || "等待 YouTube 頁面回報",
     lastError: session?.lastError || "",
@@ -337,7 +460,9 @@ function isYouTubeUrl(url) {
   return typeof url === "string" && /^https:\/\/(www\.)?youtube\.com\//i.test(url);
 }
 
-function updateSession(session, patch) { Object.assign(session, patch); }
+function updateSession(session, patch) {
+  Object.assign(session, patch);
+}
 
 async function persistStatus() {
   const data = {};
@@ -347,7 +472,8 @@ async function persistStatus() {
       lastAction: session.lastAction,
       lastError: session.lastError,
       lastSkipAt: session.lastSkipAt,
-      lastCheckedAt: session.lastCheckedAt
+      lastCheckedAt: session.lastCheckedAt,
+      pageVisibility: session.pageVisibility
     };
   }
   await chrome.storage.local.set({ [STATUS_STORAGE_KEY]: data });
@@ -362,7 +488,13 @@ async function writeLog(level, source, message, detail = undefined) {
 }
 
 async function logError(tabId, message, error) {
-  await writeLog("ERROR", "cdp", message, { tabId, error: error?.message || String(error), stack: error?.stack || "" });
+  await writeLog("ERROR", "cdp", message, {
+    tabId,
+    error: error?.message || String(error),
+    stack: error?.stack || ""
+  });
 }
 
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
