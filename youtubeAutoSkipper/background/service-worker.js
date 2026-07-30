@@ -24,53 +24,64 @@ const sessions = new Map();
 const processingTabs = new Set();
 
 chrome.runtime.onInstalled.addListener(async () => {
-  await chrome.storage.sync.set(await chrome.storage.sync.get(DEFAULT_SETTINGS));
-  await scanExistingYouTubeTabs();
-});
-
-chrome.runtime.onStartup.addListener(scanExistingYouTubeTabs);
-
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "loading" && isYouTubeUrl(tab.url)) {
-    startTab(tabId).catch((error) => logError(tabId, "啟動分頁失敗", error));
-  }
-  if (changeInfo.url && !isYouTubeUrl(changeInfo.url)) {
-    stopTab(tabId, "離開 YouTube").catch(() => {});
-  }
+  const current = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  await chrome.storage.sync.set(current);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  stopTab(tabId, "分頁已關閉").catch(() => {});
-});
-
-chrome.debugger.onDetach.addListener((source, reason) => {
-  const tabId = source.tabId;
-  if (!tabId) return;
-  const session = sessions.get(tabId);
-  if (session) {
-    session.attached = false;
-    session.lastError = `Debugger 已中斷：${reason}`;
-  }
-  writeLog("WARN", "cdp", "Debugger 已中斷", { tabId, reason });
+  sessions.delete(tabId);
+  processingTabs.delete(tabId);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
+    const tabId = sender.tab?.id ?? Number(message?.tabId);
     switch (message?.type) {
+      case "PAGE_STATE": {
+        if (!Number.isInteger(tabId)) return sendResponse({ success: false });
+        const session = getSession(tabId);
+        updateSession(session, {
+          hasPlayer: Boolean(message.hasPlayer),
+          isAdPlaying: Boolean(message.isAdPlaying),
+          foundSkipButton: Boolean(message.foundSkipButton),
+          canSkip: Boolean(message.foundSkipButton),
+          skipButtonText: message.skipButtonText || "",
+          matchedSelector: message.matchedSelector || "",
+          lastCheckedAt: new Date().toISOString(),
+          lastAction: message.foundSkipButton
+            ? "偵測到略過按鈕，準備使用 CDP 點擊"
+            : (message.isAdPlaying ? "廣告播放中，等待略過按鈕" : "目前沒有可略過廣告"),
+          lastError: ""
+        });
+        await persistStatus();
+        sendResponse({ success: true });
+        break;
+      }
+      case "SKIP_CANDIDATE": {
+        if (!Number.isInteger(tabId)) return sendResponse({ success: false });
+        const result = await clickCandidateWithTransientCdp(tabId, false);
+        sendResponse({ success: true, result });
+        break;
+      }
+      case "OVERLAY_CANDIDATE": {
+        if (!Number.isInteger(tabId)) return sendResponse({ success: false });
+        const result = await clickCandidateWithTransientCdp(tabId, true);
+        sendResponse({ success: true, result });
+        break;
+      }
       case "GET_TAB_STATUS": {
-        const tabId = Number(message.tabId);
-        sendResponse(await getPublicStatus(tabId));
+        sendResponse(await getPublicStatus(Number(message.tabId)));
         break;
       }
       case "FORCE_SCAN": {
-        const tabId = Number(message.tabId);
-        await startTab(tabId);
-        const result = await scanTab(tabId, true);
-        sendResponse({ success: true, result, status: await getPublicStatus(tabId) });
+        const forcedTabId = Number(message.tabId);
+        const result = await clickCandidateWithTransientCdp(forcedTabId, false, true);
+        sendResponse({ success: true, result, status: await getPublicStatus(forcedTabId) });
         break;
       }
       case "SETTINGS_UPDATED": {
-        for (const tabId of sessions.keys()) scheduleNext(tabId, 0);
+        const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/*", "https://youtube.com/*"] });
+        await Promise.allSettled(tabs.filter(t => t.id).map(t => chrome.tabs.sendMessage(t.id, { type: "SETTINGS_UPDATED" })));
         sendResponse({ success: true });
         break;
       }
@@ -82,170 +93,123 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       default:
         sendResponse({ success: false, message: "未知訊息" });
     }
-  })().catch((error) => sendResponse({ success: false, message: error.message || String(error) }));
+  })().catch((error) => sendResponse({ success: false, message: error?.message || String(error) }));
   return true;
 });
 
-async function scanExistingYouTubeTabs() {
-  const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/*", "https://youtube.com/*"] });
-  await Promise.allSettled(tabs.filter((tab) => tab.id).map((tab) => startTab(tab.id)));
-}
-
-async function startTab(tabId) {
-  if (!Number.isInteger(tabId)) throw new Error("無效的 tabId");
+function getSession(tabId) {
   let session = sessions.get(tabId);
   if (!session) {
-    session = createSession(tabId);
+    session = {
+      tabId,
+      skipCount: 0,
+      hasPlayer: false,
+      isAdPlaying: false,
+      foundSkipButton: false,
+      canSkip: false,
+      skipButtonText: "",
+      matchedSelector: "",
+      lastAction: "等待頁面偵測",
+      lastError: "",
+      lastSkipAt: "",
+      lastCheckedAt: ""
+    };
     sessions.set(tabId, session);
   }
-  await ensureAttached(tabId);
-  scheduleNext(tabId, 0);
+  return session;
 }
 
-function createSession(tabId) {
-  return {
-    tabId,
-    attached: false,
-    timer: null,
-    cachedSelector: "",
-    skipCount: 0,
-    hasPlayer: false,
-    isAdPlaying: false,
-    foundSkipButton: false,
-    canSkip: false,
-    skipButtonText: "",
-    matchedSelector: "",
-    lastAction: "等待偵測",
-    lastError: "",
-    lastSkipAt: "",
-    lastCheckedAt: ""
-  };
-}
-
-async function stopTab(tabId, reason) {
-  const session = sessions.get(tabId);
-  if (!session) return;
-  if (session.timer) clearTimeout(session.timer);
-  sessions.delete(tabId);
-  processingTabs.delete(tabId);
-  if (session.attached) {
-    try { await chrome.debugger.detach({ tabId }); } catch (_) {}
-  }
-  await writeLog("INFO", "cdp", "停止監控分頁", { tabId, reason });
-}
-
-function scheduleNext(tabId, delayMs) {
-  const session = sessions.get(tabId);
-  if (!session) return;
-  if (session.timer) clearTimeout(session.timer);
-  session.timer = setTimeout(async () => {
-    try {
-      await scanTab(tabId, false);
-    } catch (error) {
-      session.lastError = error.message || String(error);
-      await logError(tabId, "CDP 偵測失敗", error);
-    } finally {
-      const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-      if (sessions.has(tabId)) scheduleNext(tabId, normalizeInterval(settings.checkIntervalMs));
-    }
-  }, Math.max(0, delayMs));
-}
-
-async function scanTab(tabId, force) {
+async function clickCandidateWithTransientCdp(tabId, overlayOnly = false, force = false) {
+  if (!Number.isInteger(tabId)) throw new Error("無效的 tabId");
   if (processingTabs.has(tabId)) return { busy: true };
+
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-  if (!settings.enabled && !force) {
-    const session = sessions.get(tabId);
-    if (session) session.lastAction = "自動略過已停用";
-    return { disabled: true };
-  }
+  if (!settings.enabled && !force) return { disabled: true };
 
   processingTabs.add(tabId);
+  const session = getSession(tabId);
+  let attachedByUs = false;
   try {
-    await ensureAttached(tabId);
-    const session = sessions.get(tabId);
-    if (!session) return { stopped: true };
-
+    attachedByUs = await attachDebugger(tabId);
     const root = await getDocumentRoot(tabId);
-    const playerNodeId = await queryFirst(tabId, root.nodeId, ["#movie_player"]);
-    session.hasPlayer = Boolean(playerNodeId);
-    session.lastCheckedAt = new Date().toISOString();
+    const selectors = overlayOnly ? CLOSE_SELECTORS : SKIP_SELECTORS;
+    const found = await queryFirstWithSelector(tabId, root.nodeId, selectors);
 
-    if (!playerNodeId) {
-      updateSession(session, { isAdPlaying: false, foundSkipButton: false, canSkip: false, lastAction: "找不到播放器" });
-      await persistStatus();
-      return { found: false, reason: "no-player" };
+    if (!found) {
+      session.lastAction = overlayOnly ? "找不到廣告覆蓋層" : "略過按鈕已消失或尚未出現";
+      return { found: false };
     }
 
-    session.isAdPlaying = await nodeHasAnyClass(tabId, playerNodeId, ["ad-showing", "ad-interrupting"]);
+    const info = await getNodeInfo(tabId, found.nodeId);
+    updateSession(session, {
+      foundSkipButton: !overlayOnly,
+      canSkip: info.clickable,
+      skipButtonText: info.text,
+      matchedSelector: found.selector,
+      lastCheckedAt: new Date().toISOString()
+    });
 
-    const selectorOrder = session.cachedSelector
-      ? [session.cachedSelector, ...SKIP_SELECTORS.filter((s) => s !== session.cachedSelector)]
-      : SKIP_SELECTORS;
+    if (!info.clickable) {
+      session.lastAction = "找到按鈕，但目前不在可點擊區域";
+      return { found: true, clickable: false };
+    }
 
-    const found = await queryFirstWithSelector(tabId, root.nodeId, selectorOrder);
-    if (found) {
-      const info = await getNodeInfo(tabId, found.nodeId);
-      updateSession(session, {
-        foundSkipButton: true,
-        canSkip: info.clickable,
-        skipButtonText: info.text,
-        matchedSelector: found.selector,
-        lastAction: info.clickable ? "找到略過按鈕，準備以 CDP 點擊" : "找到略過按鈕，但目前不可點擊",
-        lastError: ""
+    await dispatchClick(tabId, info.x, info.y);
+
+    if (overlayOnly) {
+      session.lastAction = "已關閉廣告覆蓋層";
+      await writeLog("INFO", "cdp", "關閉廣告覆蓋層", { tabId, selector: found.selector });
+      return { found: true, clicked: true };
+    }
+
+    const skipped = await verifyAdEnded(tabId, 1200);
+    if (skipped) {
+      session.skipCount += 1;
+      session.lastSkipAt = new Date().toISOString();
+      session.lastAction = "已使用短暫 CDP 連線略過廣告";
+      session.lastError = "";
+      await writeLog("INFO", "cdp", "略過廣告成功", {
+        tabId, selector: found.selector, x: info.x, y: info.y, text: info.text
       });
-      session.cachedSelector = found.selector;
-
-      if (info.clickable) {
-        await dispatchClick(tabId, info.x, info.y);
-        const skipped = await verifyAdEnded(tabId, 1200);
-        if (skipped) {
-          session.skipCount += 1;
-          session.lastSkipAt = new Date().toISOString();
-          session.lastAction = "已使用 CDP 略過廣告";
-          await writeLog("INFO", "cdp", "略過廣告成功", { tabId, selector: found.selector, x: info.x, y: info.y, text: info.text });
-        } else {
-          session.lastAction = "已送出 CDP 點擊，但廣告仍在播放";
-          session.lastError = "CDP 點擊後驗證失敗";
-          await writeLog("WARN", "cdp", "略過後驗證失敗", { tabId, selector: found.selector });
-        }
-      }
     } else {
-      updateSession(session, { foundSkipButton: false, canSkip: false, skipButtonText: "", matchedSelector: "", lastAction: session.isAdPlaying ? "廣告播放中，尚未出現略過按鈕" : "目前沒有可略過廣告", lastError: "" });
-      session.cachedSelector = "";
-
-      const overlay = await queryFirstWithSelector(tabId, root.nodeId, CLOSE_SELECTORS);
-      if (overlay) {
-        const info = await getNodeInfo(tabId, overlay.nodeId);
-        if (info.clickable) {
-          await dispatchClick(tabId, info.x, info.y);
-          session.lastAction = "已關閉廣告覆蓋層";
-          await writeLog("INFO", "cdp", "關閉廣告覆蓋層", { tabId, selector: overlay.selector });
-        }
-      }
+      session.lastAction = "已送出 CDP 點擊，但廣告仍在播放";
+      session.lastError = "CDP 點擊後驗證失敗";
+      await writeLog("WARN", "cdp", "略過後驗證失敗", { tabId, selector: found.selector });
     }
-
-    await persistStatus();
-    return { found: Boolean(found), adPlaying: session.isAdPlaying };
+    return { found: true, clicked: true, skipped };
+  } catch (error) {
+    session.lastError = error?.message || String(error);
+    session.lastAction = "CDP 點擊失敗";
+    await logError(tabId, "短暫 CDP 操作失敗", error);
+    throw error;
   } finally {
+    await persistStatus();
+    if (attachedByUs) await detachDebugger(tabId);
     processingTabs.delete(tabId);
   }
 }
 
-async function ensureAttached(tabId) {
-  const session = sessions.get(tabId) || createSession(tabId);
-  if (!sessions.has(tabId)) sessions.set(tabId, session);
-  if (session.attached) return;
+async function attachDebugger(tabId) {
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_VERSION);
+    await sendCommand(tabId, "DOM.enable");
+    await sendCommand(tabId, "Runtime.enable");
+    await writeLog("DEBUG", "cdp", "短暫附加 Debugger", { tabId });
+    return true;
   } catch (error) {
-    const message = error.message || String(error);
-    if (!message.includes("Another debugger is already attached") && !message.includes("Already attached")) throw error;
+    const message = error?.message || String(error);
+    if (message.includes("Another debugger is already attached") || message.includes("Already attached")) {
+      throw new Error("此分頁目前被其他 DevTools 或擴充功能偵錯，無法自動略過");
+    }
+    throw error;
   }
-  session.attached = true;
-  await sendCommand(tabId, "DOM.enable");
-  await sendCommand(tabId, "Runtime.enable");
-  await writeLog("INFO", "cdp", "Debugger 已附加", { tabId });
+}
+
+async function detachDebugger(tabId) {
+  try {
+    await chrome.debugger.detach({ tabId });
+    await writeLog("DEBUG", "cdp", "已解除 Debugger", { tabId });
+  } catch (_) {}
 }
 
 async function getDocumentRoot(tabId) {
@@ -254,11 +218,8 @@ async function getDocumentRoot(tabId) {
 }
 
 async function queryFirst(tabId, rootNodeId, selectors) {
-  for (const selector of selectors) {
-    const result = await sendCommand(tabId, "DOM.querySelector", { nodeId: rootNodeId, selector });
-    if (result.nodeId) return result.nodeId;
-  }
-  return 0;
+  const found = await queryFirstWithSelector(tabId, rootNodeId, selectors);
+  return found?.nodeId || 0;
 }
 
 async function queryFirstWithSelector(tabId, rootNodeId, selectors) {
@@ -350,27 +311,10 @@ function sendCommand(tabId, method, commandParams = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, commandParams);
 }
 
-function normalizeInterval(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.min(5000, Math.max(300, number)) : DEFAULT_SETTINGS.checkIntervalMs;
-}
-
-function isYouTubeUrl(url) {
-  return typeof url === "string" && /^https:\/\/(www\.)?youtube\.com\//i.test(url);
-}
-
-function updateSession(session, patch) {
-  Object.assign(session, patch);
-}
-
 async function getPublicStatus(tabId) {
-  let session = sessions.get(tabId);
   let tab = null;
   try { tab = await chrome.tabs.get(tabId); } catch (_) {}
-  if (tab && isYouTubeUrl(tab.url) && !session) {
-    await startTab(tabId);
-    session = sessions.get(tabId);
-  }
+  const session = sessions.get(tabId);
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
   return {
     enabled: settings.enabled,
@@ -382,12 +326,18 @@ async function getPublicStatus(tabId) {
     skipButtonText: session?.skipButtonText || "",
     matchedSelector: session?.matchedSelector || "",
     skipCount: session?.skipCount || 0,
-    lastAction: session?.lastAction || "尚未啟動偵測",
+    lastAction: session?.lastAction || "等待 YouTube 頁面回報",
     lastError: session?.lastError || "",
     lastSkipAt: session?.lastSkipAt || "",
     lastCheckedAt: session?.lastCheckedAt || ""
   };
 }
+
+function isYouTubeUrl(url) {
+  return typeof url === "string" && /^https:\/\/(www\.)?youtube\.com\//i.test(url);
+}
+
+function updateSession(session, patch) { Object.assign(session, patch); }
 
 async function persistStatus() {
   const data = {};
@@ -415,6 +365,4 @@ async function logError(tabId, message, error) {
   await writeLog("ERROR", "cdp", message, { tabId, error: error?.message || String(error), stack: error?.stack || "" });
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }

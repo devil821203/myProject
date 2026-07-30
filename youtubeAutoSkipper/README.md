@@ -116,3 +116,17 @@ globalThis.YOUTUBE_AUTO_SKIPPER_CONFIG = Object.freeze({
 - 偵錯 Log 檢視與清除功能
 
 修改參數後，請到 `chrome://extensions/` 對擴充功能按下「重新載入」。
+
+
+## 3.2.0：偵錯提示列修正
+
+Chrome 只要分頁持續連接 `chrome.debugger`，就會顯示「此擴充功能已開始為這個瀏覽器偵錯」提示列。這是 Chrome 的安全設計，擴充功能無法隱藏或關閉。
+
+本版本改為事件驅動的混合架構：
+
+1. `content_script/content.js` 僅負責偵測略過按鈕是否出現。
+2. 按鈕出現時才短暫附加 CDP。
+3. 使用 `Input.dispatchMouseEvent` 點擊。
+4. 驗證廣告結束後立即解除 Debugger。
+
+因此提示列可能在實際略過廣告時短暫出現，但不會再長時間固定顯示。若要求完全不出現 Chrome 偵錯提示，就必須移除 `debugger` 權限並改用非受信任的 DOM 點擊，成功率可能較低。
